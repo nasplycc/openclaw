@@ -14,6 +14,7 @@ export {
   resolveRuntimePlatform,
   resolveSkillConfig,
 } from "./skills/config.js";
+export { matchExample, parseSkillExamples, type SkillExample } from "./skills/example-parser.js";
 export {
   applySkillEnvOverrides,
   applySkillEnvOverridesFromSnapshot,

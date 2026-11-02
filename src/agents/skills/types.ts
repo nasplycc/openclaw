@@ -1,3 +1,4 @@
+import type { SkillExample } from "./example-parser.js";
 import type { Skill } from "./skill-contract.js";
 
 export type SkillInstallSpec = {
@@ -79,6 +80,7 @@ export type SkillEntry = {
   metadata?: OpenClawSkillMetadata;
   invocation?: SkillInvocationPolicy;
   exposure?: SkillExposure;
+  examples?: SkillExample[]; // Parsed <example> blocks for trigger matching
 };
 
 export type SkillEligibilityContext = {

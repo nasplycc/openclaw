@@ -1,0 +1,191 @@
+diff --git a/src/agents/pi-embedded-subscribe.handlers.tools.ts b/src/agents/pi-embedded-subscribe.handlers.tools.ts
+index 598727d55a..c0809cbfc6 100644
+--- a/src/agents/pi-embedded-subscribe.handlers.tools.ts
++++ b/src/agents/pi-embedded-subscribe.handlers.tools.ts
+@@ -1,4 +1,5 @@
+ import type { AgentEvent } from "@mariozechner/pi-agent-core";
++import { triggerInternalHook, createInternalHookEvent } from "../../hooks/internal-hooks.js";
+ import type {
+   AgentApprovalEventData,
+   AgentCommandOutputEventData,
+@@ -528,20 +529,57 @@ export function handleToolExecutionStart(
+   const continueAfterBlockReplyFlush = (): void | Promise<void> => {
+     const onBlockReplyFlushResult = ctx.params.onBlockReplyFlush?.();
+     if (isPromiseLike<void>(onBlockReplyFlushResult)) {
+-      return onBlockReplyFlushResult.then(() => {
+-        continueToolExecutionStart();
++      return onBlockReplyFlushResult.then(async () => {
++        await continueToolExecutionStart();
+       });
+     }
+-    continueToolExecutionStart();
++    void continueToolExecutionStart();
+     return undefined;
+   };
+ 
+-  const continueToolExecutionStart = () => {
++  const continueToolExecutionStart = async (): Promise<void> => {
+     const rawToolName = evt.toolName;
+     const toolName = normalizeToolName(rawToolName);
+     const toolCallId = evt.toolCallId;
+     const args = evt.args;
+     const runId = ctx.params.runId;
++    const sessionKey = ctx.params.sessionKey;
++
++    // ===== [NEW] Trigger tool:beforeExecute hook =====
++    try {
++      const hookEvent = createInternalHookEvent("tool", "beforeExecute", sessionKey, {
++        toolName,
++        toolInput: args as Record<string, unknown>,
++        toolCallId,
++        isSubagent: ctx.params.isSubagent ?? false,
++      });
++      const hookResult = await triggerInternalHook(hookEvent);
++
++      // Handle permissionDecision
++      if (hookResult?.permissionDecision === "deny") {
++        ctx.log.warn(`tool:beforeExecute hook denied: tool=${toolName} toolCallId=${toolCallId}`);
++        const meta = extendExecMeta(toolName, args, inferToolMetaFromArgs(toolName, args));
++        ctx.state.toolMetaById.set(toolCallId, {
++          ...buildToolCallSummary(toolName, args, meta),
++          blocked: true,
++          blockReason: hookResult.systemMessage,
++        });
++        emitAgentEvent({
++          runId: ctx.params.runId,
++          stream: "tool",
++          data: {
++            phase: "end",
++            name: toolName,
++            toolCallId,
++            error: hookResult.systemMessage ?? "Blocked by hook",
++          },
++        });
++        return;
++      }
++    } catch (hookError) {
++      ctx.log.error(`tool:beforeExecute hook error: ${formatErrorMessage(hookError)}`);
++    }
++    // ===== [END NEW] =====
+ 
+     // Track start time and args for after_tool_call hook.
+     const startedAt = Date.now();
+@@ -759,6 +797,23 @@ export async function handleToolExecutionEnd(
+   const isError = evt.isError;
+   const result = evt.result;
+   const isToolError = isError || isToolResultError(result);
++  const sessionKey = ctx.params.sessionKey;
++
++  // ===== [NEW] Trigger tool:afterExecute hook =====
++  try {
++    const hookEvent = createInternalHookEvent("tool", "afterExecute", sessionKey, {
++      toolName,
++      toolInput: evt.args as Record<string, unknown> | undefined,
++      toolResult: result,
++      isError: isToolError,
++      toolCallId,
++      isSubagent: ctx.params.isSubagent ?? false,
++    });
++    await triggerInternalHook(hookEvent);
++  } catch (hookError) {
++    ctx.log.error(`tool:afterExecute hook error: ${formatErrorMessage(hookError)}`);
++  }
++  // ===== [END NEW] =====
+   const sanitizedResult = sanitizeToolResult(result);
+   const toolStartKey = buildToolStartKey(runId, toolCallId);
+   const startData = toolStartData.get(toolStartKey);
+diff --git a/src/hooks/internal-hook-types.ts b/src/hooks/internal-hook-types.ts
+index b806824704..869c069a75 100644
+--- a/src/hooks/internal-hook-types.ts
++++ b/src/hooks/internal-hook-types.ts
+@@ -1,9 +1,15 @@
+-export type InternalHookEventType = "command" | "session" | "agent" | "gateway" | "message";
++export type InternalHookEventType =
++  | "command"
++  | "session"
++  | "agent"
++  | "gateway"
++  | "message"
++  | "tool";
+ 
+ export interface InternalHookEvent {
+-  /** The type of event (command, session, agent, gateway, etc.) */
++  /** The type of event (command, session, agent, gateway, tool, etc.) */
+   type: InternalHookEventType;
+-  /** The specific action within the type (e.g., 'new', 'reset', 'stop') */
++  /** The specific action within the type (e.g., 'new', 'reset', 'stop', 'beforeExecute', 'afterExecute') */
+   action: string;
+   /** The session key this event relates to */
+   sessionKey: string;
+@@ -16,3 +22,45 @@ export interface InternalHookEvent {
+ }
+ 
+ export type InternalHookHandler = (event: InternalHookEvent) => Promise<void> | void;
++
++// ============================================================================
++// Tool Hook Events (新增)
++// ============================================================================
++
++export type ToolBeforeExecuteHookContext = {
++  /** Tool name (e.g., 'Bash', 'Read', 'Edit') */
++  toolName: string;
++  /** Tool input parameters */
++  toolInput: Record<string, unknown>;
++  /** Tool call ID for tracking */
++  toolCallId?: string;
++  /** Whether this is a subagent call */
++  isSubagent?: boolean;
++};
++
++export type ToolBeforeExecuteHookEvent = InternalHookEvent & {
++  type: "tool";
++  action: "beforeExecute";
++  context: ToolBeforeExecuteHookContext;
++};
++
++export type ToolAfterExecuteHookContext = {
++  /** Tool name (e.g., 'Bash', 'Read', 'Edit') */
++  toolName: string;
++  /** Tool input parameters */
++  toolInput: Record<string, unknown>;
++  /** Tool result (success output or error) */
++  toolResult?: unknown;
++  /** Whether execution resulted in an error */
++  isError?: boolean;
++  /** Tool call ID for tracking */
++  toolCallId?: string;
++  /** Whether this is a subagent call */
++  isSubagent?: boolean;
++};
++
++export type ToolAfterExecuteHookEvent = InternalHookEvent & {
++  type: "tool";
++  action: "afterExecute";
++  context: ToolAfterExecuteHookContext;
++};
+diff --git a/src/hooks/internal-hooks.ts b/src/hooks/internal-hooks.ts
+index 297987f19b..d2a1fe590b 100644
+--- a/src/hooks/internal-hooks.ts
++++ b/src/hooks/internal-hooks.ts
+@@ -17,8 +17,20 @@ import type {
+   InternalHookEvent,
+   InternalHookEventType,
+   InternalHookHandler,
++  ToolBeforeExecuteHookContext,
++  ToolBeforeExecuteHookEvent,
++  ToolAfterExecuteHookContext,
++  ToolAfterExecuteHookEvent,
+ } from "./internal-hook-types.js";
+-export type { InternalHookEvent, InternalHookEventType, InternalHookHandler };
++export type {
++  InternalHookEvent,
++  InternalHookEventType,
++  InternalHookHandler,
++  ToolBeforeExecuteHookContext,
++  ToolBeforeExecuteHookEvent,
++  ToolAfterExecuteHookContext,
++  ToolAfterExecuteHookEvent,
++};
+ 
+ export type AgentBootstrapHookContext = {
+   workspaceDir: string;

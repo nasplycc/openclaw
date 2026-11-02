@@ -10,6 +10,7 @@ import { resolveSandboxPath } from "../sandbox-paths.js";
 import { resolveEffectiveAgentSkillFilter } from "./agent-filter.js";
 import { resolveBundledSkillsDir } from "./bundled-dir.js";
 import { shouldIncludeSkill } from "./config.js";
+import { parseSkillExamples } from "./example-parser.js";
 import { normalizeSkillFilter } from "./filter.js";
 import { resolveOpenClawMetadata, resolveSkillInvocationPolicy } from "./frontmatter.js";
 import { loadSkillsFromDirSafe, readSkillFrontmatterSafe } from "./local-loader.js";
@@ -516,6 +517,7 @@ function loadSkillEntries(
         includeInAvailableSkillsPrompt: invocation.disableModelInvocation !== true,
         userInvocable: invocation.userInvocable !== false,
       },
+      examples: parseSkillExamples(skill.description),
     };
   });
   return skillEntries;
